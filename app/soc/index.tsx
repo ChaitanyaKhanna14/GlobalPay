@@ -44,6 +44,10 @@ import {
   subscribeToTriage,
   STATUS_LABEL,
   isActive,
+  fetchFleetEvents,
+  flushPending,
+  isAnalyst,
+  detectOn,
   type ScenarioId,
 } from '@/services/security/soc-service';
 import { useAuth } from '@/context/auth-context';
@@ -60,6 +64,19 @@ export default function SocDashboard() {
   const [busy, setBusy] = useState<string | null>(null);
   const [showSimulator, setShowSimulator] = useState(false);
   const [alerts, setAlerts] = useState<SecurityAlert[]>([]);
+  /**
+   * Which population the console is monitoring.
+   *
+   * "device" is this handset's own hash-chained log. "fleet" is every account
+   * this user is permitted to see, read back from Supabase — and what that
+   * returns is decided entirely by RLS, not by this toggle. A non-analyst who
+   * flips to fleet simply sees their own rows: the switch changes the query,
+   * never the permission.
+   */
+  const [scope, setScope] = useState<'device' | 'fleet'>('device');
+  const [fleetEvents, setFleetEvents] = useState<SecurityEvent[]>([]);
+  const [analyst, setAnalyst] = useState(false);
+  const [fleetLoading, setFleetLoading] = useState(false);
 
   // The SOC operates on whichever account is signed in. Without a session we
   // still render — populated by the simulator — so the console can be reviewed
@@ -81,6 +98,17 @@ export default function SocDashboard() {
   // that the memo body never reads is optimised away, so triage updates would
   // persist without ever re-rendering.
   const refreshAlerts = useCallback(() => setAlerts(getAlertsSync()), []);
+
+  /** Pull the fleet view, flushing anything this device still owes first. */
+  const refreshFleet = useCallback(async () => {
+    setFleetLoading(true);
+    try {
+      await flushPending();
+      setFleetEvents(await fetchFleetEvents(250));
+    } finally {
+      setFleetLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     let mounted = true;
@@ -104,6 +132,8 @@ export default function SocDashboard() {
       if (mounted) refreshAlerts();
     });
 
+    isAnalyst().then((ok) => mounted && setAnalyst(ok));
+
     return () => {
       mounted = false;
       unsubscribeEvents();
@@ -111,17 +141,30 @@ export default function SocDashboard() {
     };
   }, [refreshIntegrity, refreshAlerts]);
 
+  useEffect(() => {
+    if (scope === 'fleet') void refreshFleet();
+  }, [scope, refreshFleet]);
+
+  // Everything below renders from the active population rather than from the
+  // local log directly, so the toggle switches metrics, alerts and the stream
+  // together instead of leaving them describing different things.
+  const activeEvents = scope === 'fleet' ? fleetEvents : events;
+  const activeAlerts = useMemo(
+    () => (scope === 'fleet' ? detectOn(fleetEvents) : alerts),
+    [scope, fleetEvents, alerts],
+  );
+
   const metrics = useMemo(
-    () => computeMetrics(events, alerts, integrity),
-    [events, alerts, integrity],
+    () => computeMetrics(activeEvents, activeAlerts, integrity),
+    [activeEvents, activeAlerts, integrity],
   );
 
   const recentEvents = useMemo(
     () =>
-      [...events]
+      [...activeEvents]
         .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
         .slice(0, 25),
-    [events],
+    [activeEvents],
   );
 
   // ─── Actions ───
@@ -194,6 +237,45 @@ export default function SocDashboard() {
           <Text style={styles.liveText}>LIVE</Text>
         </View>
       </View>
+
+      {/* ── Scope toggle ──
+          What "fleet" returns is enforced by Row-Level Security, not by this
+          control: a non-analyst sees only their own rows either way. The toggle
+          picks the query; the database picks the answer. */}
+      <View style={styles.scopeRow}>
+        {(['device', 'fleet'] as const).map((s) => (
+          <TouchableOpacity
+            key={s}
+            onPress={() => setScope(s)}
+            style={[styles.scopeBtn, scope === s && styles.scopeBtnActive]}>
+            <Ionicons
+              name={s === 'device' ? 'phone-portrait-outline' : 'globe-outline'}
+              size={13}
+              color={scope === s ? GP.textOnYellow : GP.textSecondary}
+            />
+            <Text style={[styles.scopeText, scope === s && styles.scopeTextActive]}>
+              {s === 'device' ? 'This device' : 'Fleet'}
+            </Text>
+          </TouchableOpacity>
+        ))}
+        {scope === 'fleet' ? (
+          fleetLoading ? (
+            <ActivityIndicator size="small" color={GP.primary} style={{ marginLeft: 6 }} />
+          ) : (
+            <TouchableOpacity onPress={() => void refreshFleet()} style={styles.scopeRefresh}>
+              <Ionicons name="refresh" size={14} color={GP.textMuted} />
+            </TouchableOpacity>
+          )
+        ) : null}
+      </View>
+
+      {scope === 'fleet' ? (
+        <Text style={styles.scopeNote}>
+          {analyst
+            ? 'Analyst access — showing every account you are permitted to see.'
+            : 'Standard access — showing only your own events. Fleet visibility requires an entry in soc_analysts.'}
+        </Text>
+      ) : null}
 
       {/* ── Integrity banner ── */}
       <TouchableOpacity
@@ -341,11 +423,11 @@ export default function SocDashboard() {
 
       {/* ── Alerts ── */}
       <SectionTitle
-        title={`Active Alerts (${alerts.length})`}
+        title={`Active Alerts (${activeAlerts.length})`}
         subtitle="Correlated detections, newest first. Tap an alert for the full incident report."
       />
 
-      {alerts.length === 0 ? (
+      {activeAlerts.length === 0 ? (
         <Card style={styles.emptyCard}>
           <Ionicons name="shield-checkmark-outline" size={26} color={GP.textMuted} />
           <Text style={styles.emptyTitle}>No active alerts</Text>
@@ -356,7 +438,7 @@ export default function SocDashboard() {
         </Card>
       ) : (
         <View style={{ gap: 10 }}>
-          {alerts.map((alert) => (
+          {activeAlerts.map((alert) => (
             <TouchableOpacity
               key={alert.id}
               activeOpacity={0.8}
@@ -497,6 +579,23 @@ const styles = StyleSheet.create({
   integrityMessage: { fontSize: 11, color: GP.textSecondary, marginTop: 3, lineHeight: 15 },
 
   tileGrid: { flexDirection: 'row', gap: 10, marginBottom: 10 },
+  scopeRow: { flexDirection: 'row', alignItems: 'center', gap: 7, marginBottom: 10 },
+  scopeBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 9,
+    borderWidth: 1,
+    borderColor: GP.border,
+    backgroundColor: GP.card,
+  },
+  scopeBtnActive: { backgroundColor: GP.primary, borderColor: GP.primary },
+  scopeText: { fontSize: 11.5, fontWeight: '700', color: GP.textSecondary },
+  scopeTextActive: { color: GP.textOnYellow },
+  scopeRefresh: { padding: 6 },
+  scopeNote: { fontSize: 10.5, color: GP.textMuted, marginBottom: 12, lineHeight: 15 },
   coverageLink: {
     flexDirection: 'row',
     alignItems: 'center',

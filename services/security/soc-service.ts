@@ -47,6 +47,11 @@ export { ALL_TECHNIQUES, techniquesByTactic } from './mitre';
 export { subscribeToEvents, loadEvents, getEventsSync } from './event-log';
 export { loadAnchors, latestAnchor } from './blockchain-anchor';
 export {
+  fetchFleetEvents,
+  flushPending,
+  isAnalyst,
+} from './event-sync';
+export {
   allowedTransitions,
   isActive,
   loadTriage,
@@ -101,6 +106,17 @@ export async function getAlerts(): Promise<SecurityAlert[]> {
 
 export function getAlertsSync(): SecurityAlert[] {
   return withTriage(runDetections(getEventsSync()));
+}
+
+/**
+ * Run detections over an arbitrary event set.
+ *
+ * The fleet view correlates across every account an analyst can see, which is
+ * the whole point of a SOC — an attack spanning two accounts is invisible if
+ * each device only ever reasons about itself.
+ */
+export function detectOn(events: SecurityEvent[]): SecurityAlert[] {
+  return withTriage(runDetections(events));
 }
 
 // ─── Integrity ──────────────────────────────────
