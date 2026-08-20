@@ -55,10 +55,37 @@ Open **Profile → Security Center**, or navigate to `/soc`.
 
 | Screen | Purpose |
 |---|---|
-| `/soc` | Live metrics, alert feed, event stream, attack simulator |
+| `/soc` | Live metrics, alert feed, event stream, attack simulator, device/fleet toggle |
 | `/soc/[alertId]` | Incident report: triage workflow, risk breakdown, attack replay, ATT&CK mapping, response steps |
 | `/soc/mitre` | ATT&CK coverage matrix — techniques covered vs. actually observed |
 | `/soc/integrity` | Hash chain state, anchored Merkle roots, integrity verification |
+
+### Fleet monitoring (two or more devices)
+
+Every device keeps its own hash-chained log locally and mirrors events to
+Supabase. The console's **This device / Fleet** toggle switches which population
+it monitors.
+
+What "Fleet" returns is decided by Row-Level Security, not by the toggle: an
+ordinary account sees only its own rows, an account listed in `soc_analysts`
+sees everyone's. The switch picks the query; the database picks the answer.
+
+Grant fleet visibility to an account:
+
+```sql
+INSERT INTO public.soc_analysts (user_id, note)
+VALUES ('<auth.users uuid>', 'why this person has fleet access');
+```
+
+Revoke it by deleting the row. Because it is an explicit roster rather than
+"any signed-in user sees everything", you can always answer *"who could read
+this?"* — which is the question that matters after an incident.
+
+The local chain stays the source of truth for integrity, deliberately. If the
+server assigned ordering, concurrent appends from two devices would interleave
+into one chain and verification would depend on network round-trips, making a
+dropped request indistinguishable from tampering. Local means integrity,
+Supabase means visibility — and the tamper demo still works offline.
 
 ### Demonstrating it
 
@@ -75,9 +102,22 @@ A good five-minute walkthrough:
 5. Move the alert through triage: *Investigating* → *Resolved*. The open-alert count drops.
 6. Visit `/soc/mitre` → the coverage matrix marks the techniques that just fired in red.
 7. Go to `/soc/integrity` → **Seal root locally** → status becomes *Integrity verified*.
-8. Edit any stored event → re-check → **Tampering detected**, naming the exact event that broke.
+8. Switch the console to **Fleet** → events from every permitted account appear in one stream.
+9. Edit any stored event → re-check → **Tampering detected**, naming the exact event that broke.
 
-Step 8 is the point of the blockchain layer, and it is worth doing live.
+Step 9 is the point of the blockchain layer, and it is worth doing live.
+
+Two further guarantees are worth showing directly in the Supabase SQL editor,
+because they hold at the database level rather than in application code:
+
+```sql
+UPDATE public.security_events SET severity = 'info' WHERE id = '<any id>';
+DELETE FROM public.security_events WHERE id = '<any id>';
+```
+
+Both are rejected by append-only triggers — and they stay rejected for the
+service role, which bypasses RLS entirely. The hash chain makes tampering
+*detectable*; these triggers make the ordinary path of tampering *impossible*.
 
 ---
 
