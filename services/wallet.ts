@@ -3,9 +3,10 @@
  * Private keys are stored locally in SecureStore, never sent to any server
  */
 import { ethers } from 'ethers';
-import * as SecureStore from 'expo-secure-store';
+import * as SecureStore from '@/services/secure-storage';
 import { getRandomBytes } from 'expo-crypto';
 import { POLYGON_RPC_URL, ERC20_ABI, TOKENS } from '@/constants/tokens';
+import { recordWalletCreated, recordWalletImported } from '@/services/security/instrument';
 import type { SupportedToken, TokenBalance } from '@/types';
 
 const ACTIVE_USER_KEY = 'globalpay_active_wallet_user';
@@ -63,6 +64,10 @@ class WalletService {
     await SecureStore.setItemAsync(walletKeyForUser(userId), wallet.privateKey);
     await this.setActiveUser(userId);
 
+    // Instrumented here rather than at the four call sites in auth-service, so
+    // no future sign-up path can silently create a wallet without a record.
+    recordWalletCreated(userId);
+
     return {
       address: wallet.address,
       mnemonic: mnemonic.phrase,
@@ -85,6 +90,7 @@ class WalletService {
 
     await SecureStore.setItemAsync(walletKeyForUser(userId), wallet.privateKey);
     await this.setActiveUser(userId);
+    recordWalletImported(userId);
     return wallet.address;
   }
 

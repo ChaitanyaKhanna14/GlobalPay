@@ -1,50 +1,172 @@
-# Welcome to your Expo app 👋
+# GlobalPay Secure
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+A non-custodial cross-border payment application with an integrated security
+operations layer — built to stand as both a **blockchain** project and a
+**cybersecurity** project, with each half load-bearing rather than decorative.
 
-## Get started
+| | |
+|---|---|
+| **Payments** | Non-custodial Polygon wallet, USDC/USDT/POL transfers, GlobalPay IDs, QR pay, UPI, payment requests |
+| **Security** | Risk-based authentication, explainable fraud scoring, threat detection mapped to MITRE ATT&CK, SOC console |
+| **Blockchain** | Non-custodial key custody **and** a tamper-evident audit log anchored to Polygon as a Merkle root |
 
-1. Install dependencies
+---
 
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+## Quick start
 
 ```bash
-npm run reset-project
+npm install
+npm start          # then press w for web, a for Android, i for iOS
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Other commands:
 
-## Learn more
+```bash
+npm run web        # web directly
+npm test           # 51 tests over the security layer
+npm run typecheck  # tsc --noEmit
+npm run lint
+```
 
-To learn more about developing your project with Expo, look at the following resources:
+Requires a `.env` with:
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+```
+EXPO_PUBLIC_SUPABASE_URL=...
+EXPO_PUBLIC_SUPABASE_ANON_KEY=...
+EXPO_PUBLIC_POLYGON_RPC_URL=...     # only needed for mainnet
+EXPO_PUBLIC_SENTRY_DSN=...          # optional
+```
 
-## Join the community
+> There is no `npm run dev` script — use `npm start` or `npm run web`.
 
-Join our community of developers creating universal apps.
+### Database
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+Run these in the Supabase SQL editor, in order:
+
+1. `supabase-schema.sql` — users, transactions, payment requests
+2. `supabase-linked-accounts.sql`, `supabase-upi.sql`, `supabase-fiat-transactions.sql`, `supabase-push-tokens.sql`
+3. `supabase-security.sql` — security events, alerts, audit anchors *(optional; the SOC runs on-device without it)*
+
+---
+
+## The Security Operations Center
+
+Open **Profile → Security Center**, or navigate to `/soc`.
+
+| Screen | Purpose |
+|---|---|
+| `/soc` | Live metrics, alert feed, event stream, attack simulator |
+| `/soc/[alertId]` | Incident report: triage workflow, risk breakdown, attack replay, ATT&CK mapping, response steps |
+| `/soc/mitre` | ATT&CK coverage matrix — techniques covered vs. actually observed |
+| `/soc/integrity` | Hash chain state, anchored Merkle roots, integrity verification |
+
+### Demonstrating it
+
+The console ships with an attack simulator so detections can be shown without
+mounting a real attack. It writes synthetic entries into the app's own event
+log — it sends no network traffic and cannot be pointed at another system.
+
+A good five-minute walkthrough:
+
+1. Open `/soc` → **Attack Simulation** → run **Normal Activity** (nothing fires — this is the control case).
+2. Run **Account Takeover Chain** → a critical alert appears.
+3. Open the alert → press **Replay** to watch the kill chain unfold one step at a time.
+4. Scroll to the risk breakdown → **72/100**, with every contributing factor and its reason.
+5. Move the alert through triage: *Investigating* → *Resolved*. The open-alert count drops.
+6. Visit `/soc/mitre` → the coverage matrix marks the techniques that just fired in red.
+7. Go to `/soc/integrity` → **Seal root locally** → status becomes *Integrity verified*.
+8. Edit any stored event → re-check → **Tampering detected**, naming the exact event that broke.
+
+Step 8 is the point of the blockchain layer, and it is worth doing live.
+
+---
+
+## How the pieces fit
+
+```
+User action (login / payment)
+        │
+        ▼
+Authentication  ── password · OTP · biometric · PIN (salted hash, progressive lockout)
+        │
+        ▼
+Risk engine     ── 8 explainable factors, scored against the account's OWN prior history
+        │
+        ├── < 25   → allow
+        ├── 25–49  → monitor
+        ├── 50–74  → challenge (step-up auth)
+        └── ≥ 75   → block
+        │
+        ▼
+Security event → hash-chained into the append-only audit log
+        │
+        ├──► Detection rules correlate across the stream → alerts → SOC console
+        │
+        └──► Merkle root anchored on Polygon → tamper-evident audit trail
+```
+
+The risk engine is not advisory: `app/send.tsx` consults it before a transfer is
+confirmed, blocks at critical risk, and demands step-up authentication at high
+risk.
+
+---
+
+## Why blockchain, precisely
+
+Blockchain provides **integrity, immutability and non-repudiation**. It does not
+encrypt anything and it does not protect data in transit — TLS does that, and
+hardware-backed keystores protect data at rest.
+
+So GlobalPay Secure anchors **hashes only**. No event contents, personal data,
+balances, or wallet addresses are ever published on-chain.
+
+Two mechanisms, each covering the other's blind spot:
+
+1. **Hash chain** — every event commits to its predecessor, so editing one
+   breaks every link after it. Catches casual tampering instantly.
+2. **Anchored Merkle root** — a sophisticated attacker can edit an event *and*
+   recompute every subsequent hash, defeating mechanism 1. They cannot rewrite a
+   confirmed Polygon transaction, so the recomputed root stops matching and the
+   tampering is proven.
+
+Both claims have tests. See `tests/audit-chain.test.ts`:
+`detects an edited event` and
+`catches a tampered log even after every hash is recomputed`.
+
+---
+
+## Project layout
+
+```
+app/                     screens (expo-router file-based routing)
+  (auth)/                login, signup, OTP, password reset
+  (tabs)/                home, activity, profile
+  soc/                   Security Operations Center
+services/
+  security/              ← the security layer
+    event-log.ts         hash-chained append-only log
+    risk-engine.ts       explainable scoring (pure, portable)
+    detection-rules.ts   temporal correlation → alerts
+    blockchain-anchor.ts Merkle tree + Polygon anchoring
+    attack-simulator.ts  synthetic scenarios for demos and tests
+    alert-status.ts      analyst triage workflow
+    anchor-submitter.ts  publishes a root to Polygon
+    input-guard.ts       injection detection feeding the SOC
+    context-provider.ts  pseudonymous device + context capture
+    instrument.ts        one-line helpers the app calls
+    soc-service.ts       facade the UI talks to
+  wallet.ts              non-custodial Polygon wallet
+  secure-storage.ts      platform-aware secret storage
+tests/                   vitest suite over the security layer
+docs/SECURITY-ARCHITECTURE.md
+```
+
+---
+
+## Documentation
+
+**[docs/SECURITY-ARCHITECTURE.md](docs/SECURITY-ARCHITECTURE.md)** covers the
+threat model, the risk-factor table, the detection-rule catalogue with ATT&CK
+mappings, and — importantly — a frank **Known Limitations** section covering
+client-side scoring, local storage, and the bounds of impossible-travel
+detection.

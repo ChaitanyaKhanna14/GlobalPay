@@ -15,7 +15,7 @@ import { StatusBar } from 'expo-status-bar';
 import { ActivityIndicator, View, Text, StyleSheet } from 'react-native';
 import * as Linking from 'expo-linking';
 import 'react-native-reanimated';
-import { hasCompletedOnboarding } from './onboarding';
+import { hasCompletedOnboarding, isOnboardingCompletedSync } from './onboarding';
 
 import { AuthProvider, useAuth } from '@/context/auth-context';
 import { AppLockProvider, useAppLock } from '@/context/app-lock-context';
@@ -105,16 +105,26 @@ function RootNavigator() {
 
     const inAuthGroup = (segments[0] as string) === '(auth)';
     const onOnboarding = (segments[0] as string) === 'onboarding';
+    // Consult the synchronous cache too — state lags a tick behind the user
+    // tapping "Skip"/"Get Started", and without this the redirect below fires
+    // on that stale value and bounces them back into onboarding.
+    const finishedOnboarding = onboardingDone || isOnboardingCompletedSync();
 
-    __DEV__ && console.log('[Nav] Auth check:', { isAuthenticated, inAuthGroup, onboardingDone, segment: segments[0] });
+    __DEV__ && console.log('[Nav] Auth check:', { isAuthenticated, inAuthGroup, finishedOnboarding, segment: segments[0] });
 
     // If onboarding not done, send to onboarding (unless already there)
-    if (!onboardingDone && !onOnboarding) {
+    if (!finishedOnboarding && !onOnboarding) {
       requestAnimationFrame(() => router.replace('/onboarding' as any));
       return;
     }
 
-    if (!isAuthenticated && !inAuthGroup && onboardingDone) {
+    // The SOC console is reachable without a session in development builds only,
+    // so the security layer can be demonstrated and tested independently of the
+    // payment app's auth state. __DEV__ is false in any release build, so the
+    // guard below still applies in production — this is not a shipped bypass.
+    const socDevAccess = __DEV__ && (segments[0] as string) === 'soc';
+
+    if (!isAuthenticated && !inAuthGroup && finishedOnboarding && !socDevAccess) {
       requestAnimationFrame(() => router.replace('/(auth)' as any));
     } else if (isAuthenticated && inAuthGroup) {
       __DEV__ && console.log('[Nav] Navigating to tabs...');
@@ -149,6 +159,10 @@ function RootNavigator() {
       <Stack.Screen name="scan" options={{ presentation: 'fullScreenModal', headerShown: false }} />
       <Stack.Screen name="request" options={{ presentation: 'card', headerShown: true, title: 'Request Money' }} />
       <Stack.Screen name="linked-accounts" options={{ presentation: 'card', headerShown: true, title: 'Linked Accounts' }} />
+      <Stack.Screen name="soc/index" options={{ presentation: 'card', headerShown: false }} />
+      <Stack.Screen name="soc/integrity" options={{ presentation: 'card', headerShown: false }} />
+      <Stack.Screen name="soc/mitre" options={{ presentation: 'card', headerShown: false }} />
+      <Stack.Screen name="soc/[alertId]" options={{ presentation: 'card', headerShown: false }} />
       <Stack.Screen name="privacy-policy" options={{ presentation: 'card', headerShown: false }} />
       <Stack.Screen name="terms-of-service" options={{ presentation: 'card', headerShown: false }} />
       <Stack.Screen name="+not-found" />

@@ -24,6 +24,16 @@ import { priceService } from '@/services/price';
 import { supabase } from '@/supabase';
 import { GP } from '@/constants/colors';
 import { TOKENS, DEFAULT_TOKEN } from '@/constants/tokens';
+import { scoreAction } from '@/services/security/soc-service';
+import { guardInput } from '@/services/security/input-guard';
+import { baseContext } from '@/services/security/context-provider';
+import {
+  recordPaymentBlocked,
+  recordPaymentChallenged,
+  recordPaymentCompleted,
+  recordPaymentFailed,
+  recordPaymentInitiated,
+} from '@/services/security/instrument';
 import type { SupportedToken, TokenPrice } from '@/types';
 
 type GasSpeed = 'slow' | 'normal' | 'fast';
@@ -199,6 +209,18 @@ export default function SendScreen() {
   };
 
   const resolveRecipient = async (): Promise<{ address: string; gpId?: string } | null> => {
+    // Screen the identifier before it reaches a lookup. Supabase parameterises
+    // the query regardless, so this is not what stops injection — it is what
+    // tells the SOC that someone is probing the endpoint.
+    const guard = guardInput('recipient', recipient);
+    if (!guard.safe) {
+      Alert.alert(
+        'Invalid recipient',
+        'That does not look like a GlobalPay ID or wallet address. The attempt has been logged.',
+      );
+      return null;
+    }
+
     if (recipient.startsWith('0x') && recipient.length === 42) {
       const { data } = await supabase
         .from('users')
@@ -346,14 +368,73 @@ export default function SendScreen() {
         }
       }
 
+      // ─── Risk-based transaction authorisation ───
+      // The engine scores this transfer against the account's own history
+      // before it is confirmed, so a blocked payment never reaches the
+      // signing step. This is where the risk engine actually enforces rather
+      // than merely reporting.
+      const paymentContext = {
+        amountUsd: usdValue || undefined,
+        token: selectedToken,
+        counterparty: resolved.gpId ?? resolved.address,
+      };
+      const risk = await scoreAction({
+        action: 'payment',
+        userId: user?.id ?? 'anonymous',
+        context: await baseContext(paymentContext),
+      });
+
+      if (risk.decision === 'block') {
+        recordPaymentBlocked(
+          user?.id ?? 'anonymous',
+          { ...paymentContext, riskScore: risk.score },
+          user?.globalPayId,
+        );
+        setLoading(false);
+        Alert.alert(
+          '🛑 Transaction Blocked',
+          `${risk.summary}\n\nThis transfer has been held for review. Open the Security Center for the full breakdown.`,
+          [
+            { text: 'OK', style: 'cancel' },
+            { text: 'Security Center', onPress: () => router.push('/soc' as any) },
+          ],
+        );
+        return;
+      }
+
+      if (risk.decision === 'challenge') {
+        recordPaymentChallenged(
+          user?.id ?? 'anonymous',
+          { ...paymentContext, riskScore: risk.score },
+          user?.globalPayId,
+        );
+        const passed = await authenticateForAction(
+          `Elevated risk (${risk.score}/100) — confirm it is really you`,
+        );
+        if (!passed) {
+          setLoading(false);
+          Alert.alert(
+            'Verification Required',
+            `${risk.summary}\n\nStep-up authentication was not completed, so the transfer was not sent.`,
+          );
+          return;
+        }
+      }
+
       Alert.alert(
         'Confirm Send',
-        `Send ${amount} ${selectedToken} to ${displayRecipient}?\n\nAmount: ~$${amountUsd}${gasLine}${totalLine}`,
+        `Send ${amount} ${selectedToken} to ${displayRecipient}?\n\nAmount: ~$${amountUsd}${gasLine}${totalLine}` +
+          (risk.score >= 25 ? `\n\n⚠️ Risk score: ${risk.score}/100 (${risk.band})` : ''),
         [
           { text: 'Cancel', style: 'cancel', onPress: () => setLoading(false) },
           {
             text: 'Send',
             onPress: async () => {
+              recordPaymentInitiated(
+                user?.id ?? 'anonymous',
+                paymentContext,
+                user?.globalPayId,
+              );
               try {
                 const txHash = await walletService.sendToken(
                   selectedToken,
@@ -402,10 +483,20 @@ export default function SendScreen() {
                 const feeDisplay = actualFeeUsd !== '0' ? `\nFee: ~$${actualFeeUsd}` : '';
                 lastSendTime.current = Date.now();
                 await incrementDailySendCount();
+                recordPaymentCompleted(
+                  user?.id ?? 'anonymous',
+                  { ...paymentContext, detail: `tx ${txHash.slice(0, 18)}` },
+                  user?.globalPayId,
+                );
                 Alert.alert('Success! ✅', `Sent ${amount} ${selectedToken} (~$${amountUsd})${feeDisplay}\nTx: ${txHash.slice(0, 12)}...`, [
                   { text: 'Done', onPress: () => router.back() },
                 ]);
               } catch (e: any) {
+                recordPaymentFailed(
+                  user?.id ?? 'anonymous',
+                  { ...paymentContext, detail: e?.message ?? 'Unknown error' },
+                  user?.globalPayId,
+                );
                 Alert.alert('Transaction failed', e.message ?? 'Unknown error');
               } finally {
                 setLoading(false);

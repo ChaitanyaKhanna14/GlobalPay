@@ -86,6 +86,9 @@ export default function OnboardingScreen() {
 
   const completeOnboarding = async () => {
     await AsyncStorage.setItem(ONBOARDING_KEY, 'true');
+    // Update the synchronous cache *before* navigating so the root navigator's
+    // redirect guard cannot bounce us back to onboarding on the next render.
+    markOnboardingCompleted();
     router.replace('/(auth)/login');
   };
 
@@ -139,10 +142,31 @@ export default function OnboardingScreen() {
   );
 }
 
-/** Check if onboarding has been completed */
+/**
+ * Synchronous mirror of the persisted onboarding flag.
+ *
+ * AsyncStorage reads resolve a tick later than navigation decisions are made,
+ * so the root navigator needs a value it can consult *right now* to avoid
+ * redirecting a user who has just finished onboarding back into it.
+ */
+let onboardingCompletedCache = false;
+
+/** Check if onboarding has been completed. */
 export async function hasCompletedOnboarding(): Promise<boolean> {
+  if (onboardingCompletedCache) return true;
   const value = await AsyncStorage.getItem(ONBOARDING_KEY);
-  return value === 'true';
+  onboardingCompletedCache = value === 'true';
+  return onboardingCompletedCache;
+}
+
+/** Read the cached flag without awaiting storage. */
+export function isOnboardingCompletedSync(): boolean {
+  return onboardingCompletedCache;
+}
+
+/** Mark onboarding complete in the synchronous cache. */
+export function markOnboardingCompleted(): void {
+  onboardingCompletedCache = true;
 }
 
 const styles = StyleSheet.create({

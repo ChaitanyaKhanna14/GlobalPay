@@ -11,6 +11,15 @@ import {
   validatePassword,
   checkUsernameAvailability,
 } from '@/services/auth-service';
+import {
+  recordAccountDeleted,
+  recordEmailChange,
+  recordLoginFailure,
+  recordLoginSuccess,
+  recordLogout,
+  recordPasswordChange,
+  recordPasswordResetRequest,
+} from '@/services/security/instrument';
 import type {
   AuthState,
   AuthAction,
@@ -175,7 +184,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // ─── Email/Password Sign In ─────────────────────
   const signIn = useCallback(async (data: SignInData): Promise<SignInResult> => {
     const result = await authService.signInWithEmail(data);
-    
+
     if (result.success) {
       // Profile will be loaded by onAuthStateChange listener
       // But let's also try to load it directly for faster UX
@@ -185,10 +194,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (profile) {
           dispatch({ type: 'SET_SESSION', payload: profile });
           notificationService.register(profile.user.id).catch(() => {});
+          recordLoginSuccess(profile.user.id, profile.user.globalPayId);
         }
       }
+    } else {
+      // Failed sign-ins are the raw material for brute-force and credential
+      // stuffing detection, so they are logged even though nothing happened.
+      recordLoginFailure(data.email, result.error?.message);
     }
-    
+
     return result;
   }, []);
 
@@ -201,10 +215,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } catch (e) {
       __DEV__ && console.warn('[Auth] Failed to unregister notifications:', e);
     }
-    
+
+    if (state.user?.id) {
+      recordLogout(state.user.id, state.user.globalPayId);
+    }
+
     await authService.signOut();
     dispatch({ type: 'CLEAR_SESSION' });
-  }, [state.user?.id]);
+  }, [state.user?.id, state.user?.globalPayId]);
 
   // ─── Google Sign In ─────────────────────────────
   const signInWithGoogle = useCallback(async (): Promise<SocialAuthResult> => {
@@ -334,13 +352,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // ─── Password Reset ─────────────────────────────
   const resetPassword = useCallback(async (email: string): Promise<ResetPasswordResult> => {
+    recordPasswordResetRequest(email);
     return authService.resetPassword(email);
   }, []);
 
   // ─── Confirm Password Reset ─────────────────────
   const confirmResetPassword = useCallback(async (data: ConfirmResetPasswordData): Promise<ResetPasswordResult> => {
-    return authService.confirmResetPassword(data);
-  }, []);
+    const result = await authService.confirmResetPassword(data);
+    // A credential change is the middle link of the account-takeover chain, so
+    // it is logged regardless of who initiated it.
+    if (result.success && state.user?.id) {
+      recordPasswordChange(state.user.id, state.user.globalPayId);
+    }
+    return result;
+  }, [state.user?.id, state.user?.globalPayId]);
 
   // ─── Resend Verification Email ──────────────────
   const resendVerificationEmail = useCallback(async (email: string): Promise<{ error?: AuthError }> => {
@@ -349,17 +374,26 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // ─── Change Email ───────────────────────────────
   const changeEmail = useCallback(async (data: ChangeEmailData): Promise<ChangeEmailResult> => {
-    return authService.changeEmail(data);
-  }, []);
+    const result = await authService.changeEmail(data);
+    // Repointing the recovery address is how an attacker locks the real owner
+    // out of self-service recovery — a key signal in the takeover chain.
+    if (result.success && state.user?.id) {
+      recordEmailChange(state.user.id, state.user.globalPayId);
+    }
+    return result;
+  }, [state.user?.id, state.user?.globalPayId]);
 
   // ─── Delete Account ─────────────────────────────
   const deleteAccount = useCallback(async (password: string): Promise<DeleteAccountResult> => {
+    const userId = state.user?.id;
+    const actor = state.user?.globalPayId;
     const result = await authService.deleteAccount(password);
     if (result.success) {
+      if (userId) recordAccountDeleted(userId, actor);
       dispatch({ type: 'CLEAR_SESSION' });
     }
     return result;
-  }, []);
+  }, [state.user?.id, state.user?.globalPayId]);
 
   // ─── Refresh User ───────────────────────────────
   const refreshUser = useCallback(async (): Promise<void> => {

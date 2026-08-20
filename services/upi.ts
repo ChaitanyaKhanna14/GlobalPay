@@ -5,7 +5,7 @@
  * Cashfree / Juspay SDK would expose.  In production, swap each method body
  * with real SDK calls — the UI layer stays UNTOUCHED.
  */
-import * as SecureStore from 'expo-secure-store';
+import * as SecureStore from '@/services/secure-storage';
 import * as Crypto from 'expo-crypto';
 
 // ─── Indian Bank Database ─────────────────────

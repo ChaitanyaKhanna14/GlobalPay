@@ -18,6 +18,7 @@ import Constants from 'expo-constants';
 import { useAuth } from '@/context/auth-context';
 import { useAppLock } from '@/context/app-lock-context';
 import { walletService } from '@/services/wallet';
+import { recordKeyExported } from '@/services/security/instrument';
 import { GP } from '@/constants/colors';
 
 const APP_VERSION = Constants.expoConfig?.version ?? '1.0.0';
@@ -123,6 +124,10 @@ export default function ProfileScreen() {
               if (!pk) {
                 Alert.alert('Error', 'No wallet found on this device.');
               } else {
+                // Logged whether or not the export is legitimate: these wallets
+                // are non-custodial, so this is the single most consequential
+                // action available in the app and it must always leave a trace.
+                recordKeyExported(user?.id ?? 'anonymous', user?.globalPayId);
                 Alert.alert(
                   'Your Private Key',
                   pk,
@@ -244,6 +249,14 @@ export default function ProfileScreen() {
             <Text style={styles.menuEmoji}>🔐</Text>
           </View>
           <Text style={styles.menuLabel}>Security</Text>
+          <Text style={styles.menuArrow}>›</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity style={styles.menuRow} onPress={() => router.push('/soc' as any)}>
+          <View style={[styles.menuIconWrap, { backgroundColor: GP.cardMint }]}>
+            <Text style={styles.menuEmoji}>🛡️</Text>
+          </View>
+          <Text style={styles.menuLabel}>Security Center</Text>
           <Text style={styles.menuArrow}>›</Text>
         </TouchableOpacity>
 

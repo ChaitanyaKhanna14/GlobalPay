@@ -4,8 +4,15 @@
  */
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import * as LocalAuthentication from 'expo-local-authentication';
-import * as SecureStore from 'expo-secure-store';
+import * as Crypto from 'expo-crypto';
+import * as SecureStore from '@/services/secure-storage';
 import { AppState, AppStateStatus, Alert } from 'react-native';
+import { useAuth } from '@/context/auth-context';
+import {
+  recordPinFailure,
+  recordPinLockout,
+  recordPinSuccess,
+} from '@/services/security/instrument';
 
 const PIN_KEY = 'globalpay_app_pin';
 const LOCK_ENABLED_KEY = 'globalpay_lock_enabled';
@@ -14,6 +21,50 @@ const LOCKOUT_UNTIL_KEY = 'globalpay_lockout_until';
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_DURATION_MS = 30 * 60 * 1000; // 30 minutes
+
+// ─── PIN storage ────────────────────────────────
+/**
+ * The PIN is stored as a salted SHA-256 digest, never in plaintext.
+ *
+ * SecureStore is backed by the Keychain/Keystore and is already hard to read,
+ * but defence in depth matters most exactly where it looks unnecessary: on a
+ * rooted or jailbroken device that protection is gone, and a plaintext PIN is
+ * then readable outright — and PINs get reused for phone unlock and bank cards.
+ *
+ * The salt is a build-time constant rather than per-user because there is a
+ * single PIN per device, so there is no cross-user rainbow-table exposure to
+ * defend against; its job is to stop a precomputed table of the 10,000 possible
+ * four-digit digests from working directly. Brute force is bounded by the
+ * five-attempt progressive lockout above, not by hash cost — which is why a
+ * single SHA-256 round is adequate here where it would not be for a password.
+ */
+const PIN_SALT = 'globalpay.v1.pin';
+/** Marks a stored value as hashed, so pre-existing plaintext PINs are detectable. */
+const PIN_HASH_PREFIX = 'sha256$';
+
+async function hashPin(pin: string): Promise<string> {
+  const digest = await Crypto.digestStringAsync(
+    Crypto.CryptoDigestAlgorithm.SHA256,
+    `${PIN_SALT}:${pin}`,
+  );
+  return `${PIN_HASH_PREFIX}${digest}`;
+}
+
+/**
+ * Compare digests without early exit.
+ *
+ * Timing leakage on a locally stored digest is largely theoretical, but writing
+ * the comparison correctly costs nothing and keeps the habit intact where it
+ * does matter.
+ */
+function constantTimeEquals(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
 
 interface PinVerifyResult {
   success: boolean;
@@ -50,6 +101,12 @@ export function AppLockProvider({ children }: { children: React.ReactNode }) {
   const [lockoutUntil, setLockoutUntil] = useState<number | null>(null);
   const appState = useRef(AppState.currentState);
   const lastBackground = useRef<number>(0);
+
+  // The lock screen can be reached before a session is restored, so PIN events
+  // fall back to a placeholder subject rather than being dropped — a brute
+  // force against the lock screen is worth recording either way.
+  const { user } = useAuth();
+  const securityUserId = user?.id ?? 'unauthenticated-device';
 
   // Check biometric availability on mount
   useEffect(() => {
@@ -188,7 +245,32 @@ export function AppLockProvider({ children }: { children: React.ReactNode }) {
   };
 
   const setPin = async (pin: string) => {
-    await SecureStore.setItemAsync(PIN_KEY, pin);
+    await SecureStore.setItemAsync(PIN_KEY, await hashPin(pin));
+  };
+
+  /**
+   * Check a PIN against the stored value.
+   *
+   * Installs that predate PIN hashing hold a plaintext value. Rather than
+   * locking those users out, the first correct entry is verified against the
+   * legacy value and then transparently re-stored as a digest — so the upgrade
+   * happens silently on next unlock and the plaintext is erased.
+   */
+  const pinMatches = async (pin: string): Promise<boolean> => {
+    const stored = await SecureStore.getItemAsync(PIN_KEY);
+    if (!stored) return false;
+
+    if (stored.startsWith(PIN_HASH_PREFIX)) {
+      return constantTimeEquals(stored, await hashPin(pin));
+    }
+
+    // Legacy plaintext PIN — verify, then migrate.
+    if (constantTimeEquals(stored, pin)) {
+      await SecureStore.setItemAsync(PIN_KEY, await hashPin(pin));
+      __DEV__ && console.log('[AppLock] Migrated stored PIN to salted hash');
+      return true;
+    }
+    return false;
   };
 
   const verifyPin = async (pin: string): Promise<PinVerifyResult> => {
@@ -208,14 +290,14 @@ export function AppLockProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    const stored = await SecureStore.getItemAsync(PIN_KEY);
-    if (stored === pin) {
+    if (await pinMatches(pin)) {
       // Success - reset failed attempts
       await SecureStore.deleteItemAsync(FAILED_ATTEMPTS_KEY);
       await SecureStore.deleteItemAsync(LOCKOUT_UNTIL_KEY);
       setFailedAttempts(0);
       setLockoutUntil(null);
       setIsLocked(false);
+      recordPinSuccess(securityUserId);
       return { success: true };
     }
 
@@ -229,9 +311,12 @@ export function AppLockProvider({ children }: { children: React.ReactNode }) {
       const newLockoutUntil = Date.now() + LOCKOUT_DURATION_MS;
       await SecureStore.setItemAsync(LOCKOUT_UNTIL_KEY, newLockoutUntil.toString());
       setLockoutUntil(newLockoutUntil);
+      recordPinFailure(securityUserId, 0);
+      recordPinLockout(securityUserId, LOCKOUT_DURATION_MS / 60000);
       return { success: false, lockoutMinutes: 30 };
     }
 
+    recordPinFailure(securityUserId, MAX_FAILED_ATTEMPTS - currentAttempts);
     return { success: false, attemptsRemaining: MAX_FAILED_ATTEMPTS - currentAttempts };
   };
 

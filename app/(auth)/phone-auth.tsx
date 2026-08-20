@@ -244,7 +244,9 @@ export default function PhoneAuthScreen() {
         {otp.map((digit, index) => (
           <TextInput
             key={index}
-            ref={(ref) => (otpRefs.current[index] = ref)}
+            ref={(ref) => {
+              otpRefs.current[index] = ref;
+            }}
             style={[styles.otpInput, digit && styles.otpInputFilled]}
             value={digit}
             onChangeText={(value) => handleOtpChange(value.slice(-1), index)}
