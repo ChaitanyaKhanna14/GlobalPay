@@ -1,5 +1,5 @@
 import { Platform } from 'react-native';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, processLock } from '@supabase/supabase-js';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL!;
@@ -33,5 +33,24 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     autoRefreshToken: !isServerRender,
     persistSession: !isServerRender,
     detectSessionInUrl: false,
+    /**
+     * Serialise auth calls within this JS context instead of across browser tabs.
+     *
+     * supabase-js defaults to `navigatorLock`, which uses the Web Locks API to
+     * coordinate token refresh between tabs of the same origin. That default is
+     * wrong for us twice over. On React Native `navigator.locks` does not exist
+     * at all. And on web it actively breaks the app: whichever tab acquires the
+     * lock holds it, so every *other* tab's `getSession()` rejects with
+     * "AbortError: signal is aborted without reason". AuthProvider catches that,
+     * leaves `isAuthenticated` false, and the router sends a fully signed-in
+     * user to the login screen — while the first tab keeps working, which makes
+     * the failure look like a client-side fluke rather than a bug.
+     *
+     * `processLock` gives the same mutual exclusion via an in-memory promise
+     * chain, scoped to one JS context. Each tab then manages its own session
+     * copy, which is correct here because the session is persisted to storage
+     * and re-read on load anyway.
+     */
+    lock: processLock,
   },
 });

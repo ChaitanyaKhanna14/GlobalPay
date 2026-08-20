@@ -105,63 +105,110 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     async function initialize() {
       try {
         const { data: { session } } = await supabase.auth.getSession();
-        
+
         if (!mounted) return;
-        
+
         if (session) {
           __DEV__ && console.log('[Auth] Restoring session for userId:', session.user.id);
           const result = await loadUserProfile(session.user.id, session);
-          
+
+          if (!mounted) return;
+
           if (result) {
             dispatch({ type: 'SET_SESSION', payload: result });
-            // Register for push notifications
-            notificationService.register(result.user.id).catch((e) =>
-              __DEV__ && console.warn('[Auth] Push notification registration failed:', e),
-            );
+            // Push registration is best-effort and must never affect auth. It is
+            // wrapped rather than only .catch()-ed because a synchronous throw
+            // (expo-notifications on web) escapes .catch entirely and would
+            // otherwise abort initialisation after the session was restored.
+            try {
+              void notificationService.register(result.user.id).catch((e) =>
+                __DEV__ && console.warn('[Auth] Push notification registration failed:', e),
+              );
+            } catch (e) {
+              __DEV__ && console.warn('[Auth] Push notification registration threw:', e);
+            }
           } else {
             __DEV__ && console.warn('[Auth] Session exists but profile not found');
             // User might be mid-signup (social/phone) - don't sign out yet
-            dispatch({ type: 'SET_INITIALIZED' });
           }
         } else {
           __DEV__ && console.log('[Auth] No existing session');
-          dispatch({ type: 'SET_INITIALIZED' });
         }
       } catch (e) {
         __DEV__ && console.error('[Auth] Initialize error:', e);
-        dispatch({ type: 'SET_INITIALIZED' });
+      } finally {
+        /**
+         * Always leave the loading state, on every path.
+         *
+         * Previously each branch had to remember to dispatch SET_INITIALIZED,
+         * and any path that missed it — an early return, a throw, a profile
+         * lookup that resolved after an unmount — stranded the app on the
+         * splash screen forever with no way out.
+         *
+         * SET_INITIALIZED only clears `isLoading` and sets `isInitialized`; it
+         * preserves user/session/isAuthenticated. So dispatching it here is
+         * safe even when SET_SESSION has already run above.
+         */
+        if (mounted) dispatch({ type: 'SET_INITIALIZED' });
       }
     }
 
     initialize();
 
-    // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
+    /**
+     * Listen for auth changes.
+     *
+     * The callback is deliberately synchronous, and all real work is deferred
+     * to a fresh task.
+     *
+     * GoTrue invokes this callback *while holding the auth lock*. The previous
+     * version was `async` and awaited a profile fetch plus a 1-second retry
+     * sleep, so the lock stayed held for seconds — during which the concurrent
+     * `getSession()` in initialize() above could not acquire it and timed out
+     * with "Lock acquisition timed out after 10000ms". The user then landed on
+     * the login screen despite a perfectly valid session.
+     *
+     * Deferring with setTimeout lets the callback return immediately, releasing
+     * the lock before any awaiting begins. This is the pattern Supabase's own
+     * documentation prescribes: never await, and never call another Supabase
+     * method, inside an onAuthStateChange callback.
+     */
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       if (!mounted) return;
       __DEV__ && console.log('[Auth] onAuthStateChange event:', _event, 'session?', !!session);
-      
+
       // Skip if we're in the middle of signup
       if (isSigningUp.current) {
         __DEV__ && console.log('[Auth] Skipping — signup in progress');
         return;
       }
 
-      if (session) {
-        // Try to load profile with retry
-        let result = await loadUserProfile(session.user.id, session);
-        if (!result) {
-          // Retry once after delay
-          await new Promise((resolve) => setTimeout(resolve, 1000));
-          result = await loadUserProfile(session.user.id, session);
+      setTimeout(async () => {
+        if (!mounted) return;
+
+        if (session) {
+          // Try to load profile with retry
+          let result = await loadUserProfile(session.user.id, session);
+          if (!result) {
+            // Retry once after delay
+            await new Promise((resolve) => setTimeout(resolve, 1000));
+            result = await loadUserProfile(session.user.id, session);
+          }
+
+          if (!mounted) return;
+
+          if (result) {
+            dispatch({ type: 'SET_SESSION', payload: result });
+            try {
+              void notificationService.register(result.user.id).catch(() => {});
+            } catch {
+              /* push registration must never affect auth */
+            }
+          }
+        } else {
+          dispatch({ type: 'CLEAR_SESSION' });
         }
-        
-        if (result) {
-          dispatch({ type: 'SET_SESSION', payload: result });
-          notificationService.register(result.user.id).catch(() => {});
-        }
-      } else {
-        dispatch({ type: 'CLEAR_SESSION' });
-      }
+      }, 0);
     });
 
     return () => {
