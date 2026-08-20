@@ -19,6 +19,7 @@
  */
 import { keccak256, toUtf8Bytes } from 'ethers';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { enqueue } from './event-sync';
 import {
   categoryOf,
   type EventContext,
@@ -208,6 +209,9 @@ export async function recordEvent(input: RecordEventInput): Promise<SecurityEven
   cache = events;
   await persist(events);
   emit(events);
+  // Mirror upward for fleet visibility. Fire-and-forget: the local chain is
+  // the source of truth, so a failed sync must never fail the write.
+  void enqueue([event]);
   return event;
 }
 
@@ -240,6 +244,7 @@ export async function recordEvents(inputs: RecordEventInput[]): Promise<Security
   cache = events;
   await persist(events);
   emit(events);
+  void enqueue(created);
   return created;
 }
 

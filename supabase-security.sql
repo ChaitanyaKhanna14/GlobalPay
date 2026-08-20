@@ -1,13 +1,60 @@
 -- ═══════════════════════════════════════════════════════════════════
 -- GlobalPay Secure — Security Layer Schema
--- Run in the Supabase SQL Editor: https://supabase.com/dashboard
 --
--- The app currently keeps its security event log on-device so the SOC works
--- with zero backend setup. This schema is the server-side destination for that
--- log, and it is where the layer belongs in production for one specific reason:
--- an attacker controls their own device, so a log they can edit — and a risk
--- score they can compute — are not controls, they are suggestions.
+-- STATUS: APPLIED to the live project via Supabase migrations
+--   * security_operations_schema
+--   * harden_security_definer_functions
+--   * restrict_is_soc_analyst_execute
+--
+-- This file is the readable reference for that schema. `supabase migration
+-- list` is the authority on what is deployed. Re-running this file against a
+-- fresh project reproduces the same state.
+--
+-- Verified against the live database:
+--   - UPDATE on security_events  -> rejected by trigger
+--   - DELETE on security_events  -> rejected by trigger
+--   (both hold even for the service role, which bypasses RLS)
 -- ═══════════════════════════════════════════════════════════════════
+
+
+-- ═══════════════════════════════════════════════════════════════════
+-- Analyst roster
+--
+-- Fleet-wide visibility is a privilege, not a default. Membership here is what
+-- lets an account read other users' security events. Modelling it as an
+-- explicit roster (rather than "any authenticated user sees everything") keeps
+-- the blast radius small and makes the grant auditable — you can always answer
+-- "who could read this?".
+--
+-- Nobody can self-enrol: adding an analyst is a service-role/dashboard
+-- operation on purpose.
+-- ═══════════════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS public.soc_analysts (
+  user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  granted_at TIMESTAMPTZ DEFAULT NOW(),
+  note TEXT
+);
+ALTER TABLE public.soc_analysts ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Analysts can see their own membership" ON public.soc_analysts
+  FOR SELECT USING (auth.uid() = user_id);
+
+-- SECURITY DEFINER so the check does not recurse through the policies that
+-- call it. search_path is pinned: a mutable search_path lets a caller shadow
+-- `public` and hijack execution inside a definer-rights function.
+CREATE OR REPLACE FUNCTION public.is_soc_analyst()
+RETURNS boolean LANGUAGE sql STABLE SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+  SELECT EXISTS (SELECT 1 FROM public.soc_analysts WHERE user_id = auth.uid());
+$$;
+
+-- Postgres grants EXECUTE to PUBLIC on every new function, so revoking from
+-- `anon` alone leaves it reachable. `authenticated` must keep EXECUTE because
+-- RLS policy expressions evaluate with the querying role's privileges.
+REVOKE EXECUTE ON FUNCTION public.is_soc_analyst() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.is_soc_analyst() FROM anon;
+GRANT  EXECUTE ON FUNCTION public.is_soc_analyst() TO authenticated;
 
 -- ─── Security Events ─────────────────────────────
 -- Append-only, hash-chained. Each row commits to the row before it.
@@ -140,16 +187,16 @@ ALTER TABLE public.audit_anchors  ENABLE ROW LEVEL SECURITY;
 
 -- Users may read their own security history — this is a transparency feature,
 -- and regulations such as GDPR Article 15 require it.
-CREATE POLICY "Users read own security events" ON public.security_events
-  FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "Read own security events" ON public.security_events
+  FOR SELECT USING (auth.uid() = user_id OR public.is_soc_analyst());
 
 -- Clients may append events, but only ones attributed to themselves. A client
 -- cannot forge activity under another account.
-CREATE POLICY "Users append own security events" ON public.security_events
+CREATE POLICY "Append own security events" ON public.security_events
   FOR INSERT WITH CHECK (auth.uid() = user_id);
 
-CREATE POLICY "Users read own alerts" ON public.security_alerts
-  FOR SELECT USING (auth.uid() = user_id);
+CREATE POLICY "Read own alerts" ON public.security_alerts
+  FOR SELECT USING (auth.uid() = user_id OR public.is_soc_analyst());
 
 -- Anchors commit to hashes only and contain nothing sensitive; public
 -- readability is the point, since third-party verification is the whole
@@ -157,13 +204,12 @@ CREATE POLICY "Users read own alerts" ON public.security_alerts
 CREATE POLICY "Anchors are publicly readable" ON public.audit_anchors
   FOR SELECT USING (true);
 
--- NOTE ON ANALYST ACCESS
--- A production SOC needs analysts who can read across accounts, which is a
--- privileged role and deliberately NOT granted here. Adding a naive
--- "analysts see everything" policy to a student project would create exactly
--- the over-broad access that real breaches exploit. The correct shape is a
--- separate console authenticating with the service role behind its own access
--- controls and its own audit trail of who viewed what.
+-- ANALYST ACCESS
+-- Implemented above via public.soc_analysts + public.is_soc_analyst(). Fleet
+-- visibility is granted per-account and is revocable, rather than handed to
+-- every authenticated user — which is the over-broad access real breaches
+-- exploit. Grant it with:
+--   INSERT INTO public.soc_analysts (user_id, note) VALUES ('<uuid>', 'why');
 
 -- ═══════════════════════════════════════════════════════════════════
 -- Convenience view: SOC metrics

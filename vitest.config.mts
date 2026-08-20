@@ -26,6 +26,12 @@ export default defineConfig({
         find: 'react-native',
         replacement: path.resolve(import.meta.dirname, 'tests/stubs/react-native.ts'),
       },
+      // Must precede the generic '@' alias, or '@/supabase' resolves to the
+      // real client and throws on missing env vars.
+      {
+        find: '@/supabase',
+        replacement: path.resolve(import.meta.dirname, 'tests/stubs/supabase.ts'),
+      },
       { find: '@', replacement: path.resolve(import.meta.dirname, '.') },
     ],
   },
