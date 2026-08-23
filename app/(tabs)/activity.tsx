@@ -19,6 +19,11 @@ import { priceService } from '@/services/price';
 import { GP } from '@/constants/colors';
 import { TransactionListSkeleton } from '@/components/skeleton';
 import type { Transaction, PaymentRequest, SupportedToken } from '@/types';
+import {
+  isEnrolledWallet,
+  UNENROLLED_RECIPIENT_TITLE,
+  UNENROLLED_RECIPIENT_MESSAGE,
+} from '@/services/security/recipient-guard';
 
 const TX_COLORS = [GP.cardYellow, GP.cardGreen, GP.cardCoral, GP.cardOrange, GP.cardMint];
 
@@ -217,6 +222,13 @@ export default function ActivityScreen() {
 
     if (lookupErr || !requesterData) {
       Alert.alert('Error', 'Could not find the requester\'s wallet. They may have deleted their account.');
+      return;
+    }
+
+    // Same guard as the send screen: a profile can exist before its owner has
+    // enrolled a device, and its placeholder wallet must never receive funds.
+    if (!isEnrolledWallet(requesterData.wallet_address)) {
+      Alert.alert(UNENROLLED_RECIPIENT_TITLE, UNENROLLED_RECIPIENT_MESSAGE);
       return;
     }
 

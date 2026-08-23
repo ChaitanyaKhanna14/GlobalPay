@@ -87,6 +87,61 @@ into one chain and verification would depend on network round-trips, making a
 dropped request indistinguishable from tampering. Local means integrity,
 Supabase means visibility — and the tamper demo still works offline.
 
+### Demo accounts and device enrolment
+
+Three accounts exist for the two-phone demo:
+
+| Account | GlobalPay ID | Sign-in email | Fleet analyst |
+| --- | --- | --- | --- |
+| Nehan | `nehan@globalpay` | (personal) | yes |
+| Kousthub | `kousthub@globalpay` | `kousthub@globalpay.demo` | not yet — see below |
+| Aditi | `aditi@globalpay` | `aditi@globalpay.demo` | not yet — see below |
+
+The two teammate accounts were provisioned through the same GoTrue signup
+endpoint the app itself calls, and their profile rows were inserted using each
+account's own session token — so the writes had to pass the identical RLS check
+a real device faces. Nothing was hand-written into `auth.users`.
+
+Their passwords are throwaway demo values and should be changed by their owners
+before the account is used for anything beyond this project.
+
+**They have no wallet yet, and that is the correct state.** The wallet is
+non-custodial: the private key is generated on the phone at first sign-in and
+exists nowhere else, so no server-side provisioning step can create one. Until
+each teammate signs in on their own device, `users.wallet_address` holds a
+deliberately non-address-shaped placeholder (`pending-device-enrolment:<name>`),
+and `loadUserProfile()` replaces it with the real address on that first sign-in.
+
+The placeholder is not address-shaped on purpose. A payment resolves its
+destination straight out of that column, so an address-shaped placeholder — the
+zero address, say — would be a perfectly transferable burn address: the transfer
+would succeed, the receipt would look ordinary, and the tokens would be
+unrecoverable. `services/security/recipient-guard.ts` rejects any recipient whose
+stored wallet is not a valid address, so paying an un-enrolled account fails
+loudly instead of silently.
+
+### A live least-privilege demo
+
+Kousthub and Aditi are deliberately **left off** the analyst roster, because the
+contrast is worth more than the convenience:
+
+1. On the second phone, open `/soc` and switch to **Fleet**. Only that account's
+   own events appear — the query asked for everything and the database returned
+   what the policy allowed.
+2. Grant access live:
+
+   ```sql
+   INSERT INTO public.soc_analysts (user_id, note)
+   SELECT id, 'demo — second analyst' FROM auth.users
+   WHERE email = 'kousthub@globalpay.demo';
+   ```
+
+3. Pull to refresh. The fleet is now visible, with no app change, no redeploy and
+   no sign-out. `DELETE` the row and it goes away again.
+
+That is the whole argument for enforcing authorisation in the database rather
+than the client, demonstrated in about thirty seconds.
+
 ### Demonstrating it
 
 The console ships with an attack simulator so detections can be shown without

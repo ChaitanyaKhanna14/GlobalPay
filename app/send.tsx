@@ -26,6 +26,11 @@ import { GP } from '@/constants/colors';
 import { TOKENS, DEFAULT_TOKEN } from '@/constants/tokens';
 import { scoreAction } from '@/services/security/soc-service';
 import { guardInput } from '@/services/security/input-guard';
+import {
+  isEnrolledWallet,
+  UNENROLLED_RECIPIENT_TITLE,
+  UNENROLLED_RECIPIENT_MESSAGE,
+} from '@/services/security/recipient-guard';
 import { baseContext } from '@/services/security/context-provider';
 import {
   recordPaymentBlocked,
@@ -239,6 +244,13 @@ export default function SendScreen() {
       .single();
 
     if (error || !data) {
+      return null;
+    }
+
+    // The row exists, but the wallet may still be a pre-enrolment placeholder.
+    // Paying it would send real tokens to an unspendable destination.
+    if (!isEnrolledWallet(data.wallet_address)) {
+      Alert.alert(UNENROLLED_RECIPIENT_TITLE, UNENROLLED_RECIPIENT_MESSAGE);
       return null;
     }
 
