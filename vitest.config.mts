@@ -12,6 +12,12 @@ import path from 'node:path';
  * the hash-chain and anchoring logic can still be exercised end to end.
  */
 export default defineConfig({
+  // Metro defines __DEV__ at bundle time, so modules guard their diagnostic
+  // logging with it. Under plain Node the identifier does not exist, and any
+  // module reaching such a line throws ReferenceError — which the surrounding
+  // catch then swallows and reports as an unrelated failure. Pinning it to
+  // false keeps test output quiet and the guards honest.
+  define: { __DEV__: 'false' },
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],

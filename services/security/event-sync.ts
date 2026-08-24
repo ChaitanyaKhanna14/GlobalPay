@@ -26,7 +26,11 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase } from '@/supabase';
 import type { SecurityEvent } from '@/types/security';
 
-const PENDING_KEY = 'globalpay_security_sync_pending';
+/** Exported so tests can seed and inspect the queue directly. */
+export const PENDING_KEY = 'globalpay_security_sync_pending';
+
+/** Upper bound on drain passes per flush, so a busy device cannot spin here. */
+const MAX_FLUSH_PASSES = 5;
 
 /** Column shape of public.security_events. */
 interface EventRow {
@@ -124,26 +128,46 @@ export async function flushPending(): Promise<{ sent: number; queued: number }> 
   if (flushing) return { sent: 0, queued: (await readPending()).length };
   flushing = true;
   try {
-    const pending = await readPending();
-    if (pending.length === 0) return { sent: 0, queued: 0 };
+    let totalSent = 0;
 
-    // Without a session the insert would fail the RLS check anyway.
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) return { sent: 0, queued: pending.length };
+    // Loop rather than send once, because events keep arriving while a request
+    // is in flight and `enqueue` cannot start a second flush. Bounded so a
+    // permanently busy device cannot spin here.
+    for (let pass = 0; pass < MAX_FLUSH_PASSES; pass++) {
+      const batch = await readPending();
+      if (batch.length === 0) return { sent: totalSent, queued: 0 };
 
-    const rows = pending.map(toRow);
-    const { error } = await supabase
-      .from('security_events')
-      .upsert(rows, { onConflict: 'id', ignoreDuplicates: true });
+      // Without a session the insert would fail the RLS check anyway.
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return { sent: totalSent, queued: batch.length };
 
-    if (error) {
-      __DEV__ && console.warn('[EventSync] Upload failed, keeping queue:', error.message);
-      return { sent: 0, queued: pending.length };
+      const { error } = await supabase
+        .from('security_events')
+        .upsert(batch.map(toRow), { onConflict: 'id', ignoreDuplicates: true });
+
+      if (error) {
+        __DEV__ && console.warn('[EventSync] Upload failed, keeping queue:', error.message);
+        return { sent: totalSent, queued: batch.length };
+      }
+
+      // Remove exactly what this pass sent, re-reading the queue first.
+      // Clearing it wholesale would discard anything appended while the request
+      // was in flight — which is precisely when security events cluster, since
+      // signing in fires several within a few hundred milliseconds of each
+      // other. Those events survive in the local hash chain either way, so the
+      // bug cost fleet visibility rather than integrity, and was invisible from
+      // the device that dropped them.
+      const sentIds = new Set(batch.map((e) => e.id));
+      const remaining = (await readPending()).filter((e) => !sentIds.has(e.id));
+      await writePending(remaining);
+
+      totalSent += batch.length;
+      __DEV__ && console.log(`[EventSync] Synced ${batch.length} event(s)`);
+
+      if (remaining.length === 0) return { sent: totalSent, queued: 0 };
     }
 
-    await writePending([]);
-    __DEV__ && console.log(`[EventSync] Synced ${rows.length} event(s)`);
-    return { sent: rows.length, queued: 0 };
+    return { sent: totalSent, queued: (await readPending()).length };
   } catch (e) {
     __DEV__ && console.warn('[EventSync] Flush error:', e);
     return { sent: 0, queued: -1 };

@@ -113,16 +113,37 @@ export const TOKENS = NETWORK_MODE === 'testnet' ? TESTNET_TOKENS : MAINNET_TOKE
 
 export const DEFAULT_TOKEN: SupportedToken = 'USDC';
 
-// Network-specific RPC URLs and chain IDs
+/**
+ * RPC endpoints, tried in priority order.
+ *
+ * A single hard-coded endpoint is a single point of failure, and we learned
+ * that the expensive way: `rpc-amoy.polygon.technology` stopped answering and
+ * every blockchain feature in the app died at once, with the only symptom being
+ * ethers retrying "failed to detect network" once a second forever.
+ *
+ * Public testnet RPCs are free, unaccountable, and go down without notice, so
+ * the app treats any one of them as unreliable by construction. An env override
+ * comes first for anyone with a paid endpoint.
+ */
+const AMOY_RPC_URLS: string[] = [
+  process.env.EXPO_PUBLIC_POLYGON_AMOY_RPC_URL,
+  'https://polygon-amoy-bor-rpc.publicnode.com',
+  'https://rpc.ankr.com/polygon_amoy',
+  'https://polygon-amoy.drpc.org',
+  'https://rpc-amoy.polygon.technology',
+].filter((url): url is string => typeof url === 'string' && url.length > 0);
+
 const TESTNET_CONFIG = {
-  rpcUrl: 'https://rpc-amoy.polygon.technology',
+  rpcUrls: AMOY_RPC_URLS,
   chainId: 80002,
   explorerUrl: 'https://amoy.polygonscan.com',
   networkName: 'Polygon Amoy Testnet',
 };
 
 const MAINNET_CONFIG = {
-  rpcUrl: process.env.EXPO_PUBLIC_POLYGON_RPC_URL ?? '',
+  rpcUrls: [process.env.EXPO_PUBLIC_POLYGON_RPC_URL].filter(
+    (url): url is string => typeof url === 'string' && url.length > 0,
+  ),
   chainId: 137,
   explorerUrl: 'https://polygonscan.com',
   networkName: 'Polygon Mainnet',
@@ -131,13 +152,15 @@ const MAINNET_CONFIG = {
 const NETWORK_CONFIG = NETWORK_MODE === 'testnet' ? TESTNET_CONFIG : MAINNET_CONFIG;
 
 // Polygon RPC
-export const POLYGON_RPC_URL = NETWORK_CONFIG.rpcUrl;
+export const POLYGON_RPC_URLS = NETWORK_CONFIG.rpcUrls;
+/** First-choice endpoint. Prefer POLYGON_RPC_URLS so failover is preserved. */
+export const POLYGON_RPC_URL = NETWORK_CONFIG.rpcUrls[0] ?? '';
 export const POLYGON_CHAIN_ID = NETWORK_CONFIG.chainId;
 export const POLYGONSCAN_URL = NETWORK_CONFIG.explorerUrl;
 export const NETWORK_NAME = NETWORK_CONFIG.networkName;
 
 // Warn if mainnet RPC is not set
-if (NETWORK_MODE === 'mainnet' && !MAINNET_CONFIG.rpcUrl) {
+if (NETWORK_MODE === 'mainnet' && MAINNET_CONFIG.rpcUrls.length === 0) {
   console.warn('[GlobalPay] EXPO_PUBLIC_POLYGON_RPC_URL is not set. Blockchain features will fail.');
 }
 
