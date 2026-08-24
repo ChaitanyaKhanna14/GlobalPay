@@ -97,6 +97,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const isSigningUp = useRef(false);
   // Track pending social/phone signup that needs username
   const pendingSignup = useRef<{ userId: string; email?: string } | null>(null);
+  /**
+   * Guards against logging the same authentication twice. Cleared on sign-out,
+   * so the next sign-in is recorded normally.
+   */
+  const loginRecordedFor = useRef<string | null>(null);
 
   // ─── Initialize Auth ────────────────────────────
   useEffect(() => {
@@ -199,6 +204,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
           if (result) {
             dispatch({ type: 'SET_SESSION', payload: result });
+
+            /**
+             * Record the successful authentication here rather than inside
+             * signIn().
+             *
+             * This is the authoritative signal that a session was established:
+             * it fires for every sign-in path, and it does not depend on the
+             * second `getSession()` that signIn() makes — a call we have
+             * watched lose a race for the auth lock and time out, which would
+             * lose the login event entirely.
+             *
+             * Gating on SIGNED_IN keeps the semantics honest. Restoring a
+             * persisted session raises INITIAL_SESSION and a token renewal
+             * raises TOKEN_REFRESHED, so neither is reported as a fresh
+             * authentication — a resumed session is not someone logging in,
+             * and treating it as one would bury real sign-ins in noise.
+             */
+            if (_event === 'SIGNED_IN' && loginRecordedFor.current !== result.user.id) {
+              loginRecordedFor.current = result.user.id;
+              recordLoginSuccess(result.user.id, result.user.globalPayId);
+            }
+
             try {
               void notificationService.register(result.user.id).catch(() => {});
             } catch {
@@ -206,6 +233,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             }
           }
         } else {
+          loginRecordedFor.current = null;
           dispatch({ type: 'CLEAR_SESSION' });
         }
       }, 0);
@@ -241,7 +269,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (profile) {
           dispatch({ type: 'SET_SESSION', payload: profile });
           notificationService.register(profile.user.id).catch(() => {});
-          recordLoginSuccess(profile.user.id, profile.user.globalPayId);
+          // The login event is recorded by the onAuthStateChange handler, which
+          // sees every sign-in path and cannot be skipped by this optimistic
+          // fetch failing or losing the auth lock.
         }
       }
     } else {
